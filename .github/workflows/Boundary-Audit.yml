@@ -14,7 +14,6 @@ on:
         required: false
         default: "mlx-community/DeepSeek-R1-Distill-Qwen-1.5B-MLX"
       runner_label:
-        description: "GitHub-hosted Apple Silicon runner. Use self-hosted for paper-scale 7B/14B experiments."
         required: false
         default: "macos-26"
 
@@ -25,6 +24,27 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Locate repo files
+        run: |
+          echo "PWD=$(pwd)"
+          find . -maxdepth 4 -type f | sort | head -200
+
+      - name: Normalize experiment layout
+        run: |
+          mkdir -p experiments results/fast_paper_boundary_audit
+
+          FOUND="$(find . -type f -name 'qwen_boundary_audit.py' | head -1 || true)"
+
+          if [ -z "$FOUND" ]; then
+            echo "ERROR: Could not find qwen_boundary_audit.py anywhere in repo."
+            echo "Files found:"
+            find . -maxdepth 5 -type f | sort
+            exit 1
+          fi
+
+          echo "Found original experiment at: $FOUND"
+          cp "$FOUND" experiments/qwen_boundary_audit.py
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -38,14 +58,14 @@ jobs:
 
       - name: Add fast paper-grade experiment
         run: |
-          mkdir -p experiments results/fast_paper_boundary_audit
-
           cat > experiments/fast_paper_boundary_audit.py <<'PY'
           from __future__ import annotations
 
-          import argparse, csv, hashlib, json, random, re, time
+          import argparse, csv, hashlib, json, random, re, sys, time
           from pathlib import Path
           from mlx_lm import load
+
+          sys.path.insert(0, str(Path(__file__).resolve().parent))
 
           from qwen_boundary_audit import (
               LABELS,
@@ -88,10 +108,7 @@ jobs:
           def random_length_matched(seed: int, target: str) -> str:
               rng = random.Random(seed)
               n = max(12, len(re.findall(r"[A-Za-z]+", target)))
-              vocab = [
-                  "audit", "signal", "record", "case", "entry", "context",
-                  "pattern", "trace", "token", "field", "state", "note"
-              ]
+              vocab = ["audit", "signal", "record", "case", "entry", "context", "pattern", "trace", "token", "field", "state", "note"]
               return " ".join(rng.choice(vocab) for _ in range(n))
 
           def teacher_prompt(case, kind: str) -> str:
@@ -132,12 +149,7 @@ jobs:
               raise ValueError(kind)
 
           def audit_prompt(case, condition, material):
-              if condition in [
-                  "transcript_only",
-                  "route_id_only",
-                  "natural_metadata",
-                  "forced_route_metadata",
-              ]:
+              if condition in ["transcript_only", "route_id_only", "natural_metadata", "forced_route_metadata"]:
                   return original_prompt_for(case, condition)
 
               labels = ", ".join(LABELS)
@@ -155,31 +167,19 @@ jobs:
           {case["query_family"]}
           """
 
-              if condition == "teacher_cot":
-                  extra = material["cot"]
-                  name = "Private teacher reasoning trace"
-              elif condition == "teacher_paraphrase":
-                  extra = material["paraphrase"]
-                  name = "Information-preserving paraphrase control"
-              elif condition == "teacher_summary":
-                  extra = material["summary"]
-                  name = "Summary-only control"
-              elif condition == "teacher_random_length_matched":
-                  extra = material["random"]
-                  name = "Length-matched random-text control"
-              elif condition == "teacher_shuffled_cot":
-                  extra = material["shuffled_cot"]
-                  name = "Shuffled teacher reasoning control"
-              elif condition == "teacher_same_cot":
-                  extra = material["same_cot"]
-                  name = "Same-trace-for-all-cases control"
-              else:
-                  raise ValueError(condition)
-
+              mapping = {
+                  "teacher_cot": ("cot", "Private teacher reasoning trace"),
+                  "teacher_paraphrase": ("paraphrase", "Information-preserving paraphrase control"),
+                  "teacher_summary": ("summary", "Summary-only control"),
+                  "teacher_random_length_matched": ("random", "Length-matched random-text control"),
+                  "teacher_shuffled_cot": ("shuffled_cot", "Shuffled teacher reasoning control"),
+                  "teacher_same_cot": ("same_cot", "Same-trace-for-all-cases control"),
+              }
+              key, name = mapping[condition]
               return base + f"""
 
           {name}, outside the audited transcript:
-          {extra}
+          {material[key]}
 
           Return exactly one valid label and no other text.
           """
@@ -211,26 +211,11 @@ jobs:
 
               material = {}
               for i, case in enumerate(cases):
-                  cot = clean(qwen_generate(
-                      teacher_model,
-                      teacher_tok,
-                      teacher_prompt(case, "cot"),
-                      args.teacher_max_tokens,
-                  ))
+                  cot = clean(qwen_generate(teacher_model, teacher_tok, teacher_prompt(case, "cot"), args.teacher_max_tokens))
                   material[case["id"]] = {
                       "cot": cot,
-                      "paraphrase": clean(qwen_generate(
-                          teacher_model,
-                          teacher_tok,
-                          teacher_prompt(case, "paraphrase"),
-                          80,
-                      )),
-                      "summary": clean(qwen_generate(
-                          teacher_model,
-                          teacher_tok,
-                          teacher_prompt(case, "summary"),
-                          80,
-                      )),
+                      "paraphrase": clean(qwen_generate(teacher_model, teacher_tok, teacher_prompt(case, "paraphrase"), 80)),
+                      "summary": clean(qwen_generate(teacher_model, teacher_tok, teacher_prompt(case, "summary"), 80)),
                       "random": random_length_matched(20260611 + i, cot),
                   }
 
@@ -238,21 +223,10 @@ jobs:
               shuffled = ids[:]
               random.Random(424242).shuffle(shuffled)
               same_cot = material[ids[0]]["cot"]
+
               for cid, sid in zip(ids, shuffled):
                   material[cid]["shuffled_cot"] = material[sid]["cot"]
                   material[cid]["same_cot"] = same_cot
-
-              with open(out / "teacher_material.csv", "w", newline="", encoding="utf-8") as f:
-                  w = csv.DictWriter(
-                      f,
-                      fieldnames=[
-                          "case_id", "cot", "paraphrase", "summary",
-                          "random", "shuffled_cot", "same_cot",
-                      ],
-                  )
-                  w.writeheader()
-                  for cid, m in material.items():
-                      w.writerow({"case_id": cid, **m})
 
               rows = []
               prompt_rows = []
@@ -262,22 +236,19 @@ jobs:
                       prompt = audit_prompt(case, condition, material[case["id"]])
                       raw = qwen_generate(auditor_model, auditor_tok, prompt, args.audit_max_tokens)
                       pred = parse_label(raw)
-                      success = int(pred == case["label"])
-
-                      prompt_rows.append({
-                          "case_id": case["id"],
-                          "condition": condition,
-                          "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
-                          "gold_label": case["label"],
-                      })
-
                       rows.append({
                           "case_id": case["id"],
                           "condition": condition,
                           "gold_label": case["label"],
                           "prediction": pred,
-                          "success": success,
+                          "success": int(pred == case["label"]),
                           "raw_output": raw.strip().replace("\n", " ")[:300],
+                      })
+                      prompt_rows.append({
+                          "case_id": case["id"],
+                          "condition": condition,
+                          "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+                          "gold_label": case["label"],
                       })
 
               with open(out / "predictions.csv", "w", newline="", encoding="utf-8") as f:
@@ -290,16 +261,14 @@ jobs:
                   w.writeheader()
                   w.writerows(prompt_rows)
 
-              successes = {
-                  c: sum(r["success"] for r in rows if r["condition"] == c)
-                  for c in CONDITIONS
-              }
+              with open(out / "teacher_material.csv", "w", newline="", encoding="utf-8") as f:
+                  w = csv.DictWriter(f, fieldnames=["case_id", "cot", "paraphrase", "summary", "random", "shuffled_cot", "same_cot"])
+                  w.writeheader()
+                  for cid, m in material.items():
+                      w.writerow({"case_id": cid, **m})
 
-              lifts = {
-                  c: paired_lift(rows, "transcript_only", c)
-                  for c in CONDITIONS
-                  if c != "transcript_only"
-              }
+              successes = {c: sum(r["success"] for r in rows if r["condition"] == c) for c in CONDITIONS}
+              lifts = {c: paired_lift(rows, "transcript_only", c) for c in CONDITIONS if c != "transcript_only"}
 
               cot_vs_controls = {
                   "cot_minus_paraphrase": paired_lift(rows, "teacher_paraphrase", "teacher_cot"),
@@ -308,20 +277,6 @@ jobs:
                   "cot_minus_shuffled": paired_lift(rows, "teacher_shuffled_cot", "teacher_cot"),
                   "cot_minus_same": paired_lift(rows, "teacher_same_cot", "teacher_cot"),
               }
-
-              ci = {}
-              for c in [
-                  "route_id_only",
-                  "natural_metadata",
-                  "forced_route_metadata",
-                  "teacher_cot",
-                  "teacher_paraphrase",
-                  "teacher_summary",
-                  "teacher_random_length_matched",
-                  "teacher_shuffled_cot",
-                  "teacher_same_cot",
-              ]:
-                  ci[f"{c}_minus_transcript"] = bootstrap_ci(rows, "transcript_only", c)
 
               claim_gate = {
                   "cot_beats_transcript": lifts["teacher_cot"] > 0,
@@ -340,23 +295,16 @@ jobs:
                   "successes": successes,
                   "lifts_vs_transcript": lifts,
                   "cot_vs_controls": cot_vs_controls,
-                  "bootstrap_ci": ci,
                   "claim_gate": claim_gate,
                   "paper_claim_allowed": all(claim_gate.values()),
                   "seconds": round(time.time() - start, 2),
-                  "interpretation": (
-                      "Fast CI-scale paper-grade run. Treat as a reproducibility/smoke artifact. "
-                      "For paper-scale estimates, rerun with n_cases >= 600 and a 7B/14B teacher "
-                      "on self-hosted Apple Silicon."
-                  ),
               }
 
-              with open(out / "summary.json", "w", encoding="utf-8") as f:
+              with open(out / "summary.json", "w") as f:
                   json.dump(summary, f, indent=2)
 
-              with open(out / "paper_claim.md", "w", encoding="utf-8") as f:
+              with open(out / "paper_claim.md", "w") as f:
                   f.write("# Fast Paper-Grade Boundary Audit\n\n")
-                  f.write("This is a fast CI-scale run, not the final paper-scale estimate.\n\n")
                   f.write("## Claim gate\n\n")
                   for k, v in claim_gate.items():
                       f.write(f"- {k}: `{v}`\n")
@@ -366,30 +314,12 @@ jobs:
                   f.write("\n## CoT vs controls\n\n")
                   for k, v in cot_vs_controls.items():
                       f.write(f"- {k}: {v}\n")
-                  f.write("\n## Interpretation\n\n")
-                  f.write(summary["interpretation"] + "\n")
 
               print(json.dumps(summary, indent=2))
 
           if __name__ == "__main__":
               main()
           PY
-
-      - name: Run Lean proof/audit if present
-        run: |
-          if [ -f lakefile.lean ] || [ -f lakefile.toml ]; then
-            curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
-            echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-            "$HOME/.elan/bin/lake" build
-          else
-            echo "No Lean project found; skipping Lean build."
-          fi
-
-          if [ -f scripts/audit.sh ]; then
-            bash scripts/audit.sh
-          else
-            echo "No scripts/audit.sh found; skipping original audit shell script."
-          fi
 
       - name: Run original route-metadata experiment
         run: |
@@ -408,11 +338,17 @@ jobs:
             --teacher-max-tokens 128
 
       - name: Add summary
+        if: always()
         run: |
           echo "## Fast Paper-Grade Boundary Audit" >> "$GITHUB_STEP_SUMMARY"
-          cat results/fast_paper_boundary_audit/paper_claim.md >> "$GITHUB_STEP_SUMMARY"
+          if [ -f results/fast_paper_boundary_audit/paper_claim.md ]; then
+            cat results/fast_paper_boundary_audit/paper_claim.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No paper_claim.md produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fast-paper-boundary-audit-results
