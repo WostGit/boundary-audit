@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       n_cases:
-        description: "Fast CI: 24. Paper run: 600+ on self-hosted Apple Silicon."
+        description: "7B/7B smoke test on macos-26"
         required: false
-        default: "24"
+        default: "12"
       auditor_model:
         required: false
-        default: "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+        default: "mlx-community/Qwen2.5-7B-Instruct-4bit"
       teacher_model:
         required: false
-        default: "mlx-community/DeepSeek-R1-Distill-Qwen-1.5B-4bit"
+        default: "mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit"
       runner_label:
         required: false
         default: "macos-26"
@@ -151,7 +151,7 @@ jobs:
           def main():
               ap = argparse.ArgumentParser()
               ap.add_argument("--model", required=True)
-              ap.add_argument("--n-cases", type=int, default=24)
+              ap.add_argument("--n-cases", type=int, default=12)
               ap.add_argument("--max-tokens", type=int, default=12)
               args = ap.parse_args()
 
@@ -187,7 +187,7 @@ jobs:
 
           cat > experiments/fast_paper_boundary_audit.py <<'PY'
           from __future__ import annotations
-          import argparse, csv, hashlib, json, random, re, sys, time
+          import argparse, csv, json, random, re, sys, time
           from pathlib import Path
           from mlx_lm import load
           sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -269,7 +269,7 @@ jobs:
 
           def main():
               ap = argparse.ArgumentParser()
-              ap.add_argument("--n-cases", type=int, default=24)
+              ap.add_argument("--n-cases", type=int, default=12)
               ap.add_argument("--auditor-model", required=True)
               ap.add_argument("--teacher-model", required=True)
               ap.add_argument("--audit-max-tokens", type=int, default=12)
