@@ -14,18 +14,20 @@ on:
         required: false
         default: "mlx-community/DeepSeek-R1-Distill-Qwen-1.5B-MLX"
       runner_label:
-        description: "Use macos-14-xlarge or a self-hosted Apple Silicon runner."
+        description: "GitHub-hosted Apple Silicon runner. Use self-hosted for paper-scale 7B/14B experiments."
         required: false
-        default: "macos-14-xlarge"
+        default: "macos-26"
 
 jobs:
   fast-paper-grade-boundary-audit:
     runs-on: ${{ github.event.inputs.runner_label }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -41,7 +43,7 @@ jobs:
           cat > experiments/fast_paper_boundary_audit.py <<'PY'
           from __future__ import annotations
 
-          import argparse, csv, hashlib, json, random, re, statistics, time
+          import argparse, csv, hashlib, json, random, re, time
           from pathlib import Path
           from mlx_lm import load
 
@@ -340,12 +342,12 @@ jobs:
                   "cot_vs_controls": cot_vs_controls,
                   "bootstrap_ci": ci,
                   "claim_gate": claim_gate,
-                  "seconds": round(time.time() - start, 2),
                   "paper_claim_allowed": all(claim_gate.values()),
+                  "seconds": round(time.time() - start, 2),
                   "interpretation": (
-                      "Fast paper-grade CI run. The publishable claim is allowed only if "
-                      "teacher_cot beats transcript-only and all same-extra-text controls: "
-                      "paraphrase, summary, random length-matched, shuffled CoT, and same CoT."
+                      "Fast CI-scale paper-grade run. Treat as a reproducibility/smoke artifact. "
+                      "For paper-scale estimates, rerun with n_cases >= 600 and a 7B/14B teacher "
+                      "on self-hosted Apple Silicon."
                   ),
               }
 
